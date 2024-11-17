@@ -1,0 +1,220 @@
+#include <Servo.h>
+#include <DHT.h>  // Include the DHT library
+
+// Pin Definitions
+#define DHTPIN 2        // Pin connected to the DHT11 sensor data pin
+#define DHTTYPE DHT11   // DHT sensor type
+#define TRIGPIN 9       // Trigger pin for ultrasonic sensor
+#define ECHOPIN 8       // Echo pin for ultrasonic sensor
+#define MRf 4           // Right motor IN1 pin
+#define MRb 5           // Right motor IN2 pin
+#define ENA 3           // Right motor enable pin (PWM control)
+#define MLf 6           // Left motor IN3 pin
+#define MLb 7           // Left motor IN4 pin
+#define ENB 11          // Left motor enable pin (PWM control)
+#define VIBRATIONPIN A0 // Vibration sensor pin (analog input)
+
+#define MOTOR_SPEED 100        // Motor speed (0-255)
+#define VIBRATION_THRESHOLD 800 // Vibration threshold for accident detection
+#define DHT_INTERVAL 10000     // Interval for DHT11 sensor (10 seconds)
+#define MOVEMENT_INTERVAL 15000 // Interval to print movement status (15 seconds)
+
+Servo Myservo;  // Create a Servo object
+DHT dht(DHTPIN, DHTTYPE); // Initialize DHT11 sensor
+
+bool carRunning = false;       // Flag to track car status
+bool accidentDetected = false; // Flag to detect accidents
+unsigned long lastDHTPrintTime = 0;  // Time tracking for DHT print interval
+unsigned long lastMovementPrintTime = 0; // Time tracking for movement status
+unsigned long vibrationStartTime = 0;   // For vibration debounce
+bool potentialAccident = false;  // Flag to handle vibration debounce
+
+String lastMovement = ""; // To store last movement direction
+
+void setup() {
+  Serial.begin(9600); // Initialize Serial for Bluetooth communication
+
+  // Motor pins initialization
+  pinMode(MRf, OUTPUT);
+  pinMode(MRb, OUTPUT);
+  pinMode(MLf, OUTPUT);
+  pinMode(MLb, OUTPUT);
+  pinMode(ENA, OUTPUT);
+  pinMode(ENB, OUTPUT);
+
+  // Ultrasonic sensor pins initialization
+  pinMode(TRIGPIN, OUTPUT);
+  pinMode(ECHOPIN, INPUT);
+
+  // Vibration sensor initialization
+  pinMode(VIBRATIONPIN, INPUT);
+
+  // Initialize the servo and DHT sensor
+  Myservo.attach(10);  // Pin for servo
+  dht.begin();  // Start the DHT sensor
+
+  Serial.println("Car system initialized! Send 'start' to start the car, 'stop' to stop it.");
+}
+
+void loop() {
+  // Accident detection using vibration sensor
+  if (carRunning) {
+    int vibrationReading = analogRead(VIBRATIONPIN);
+    if (vibrationReading > VIBRATION_THRESHOLD) {
+      if (!potentialAccident) {
+        potentialAccident = true;
+        vibrationStartTime = millis();
+      } else if (millis() - vibrationStartTime > 5000) { // 5 seconds to confirm accident
+        accidentDetected = true;
+        stopCar();
+        Serial.println("Accident detected! Car stopped.");
+      }
+    } else {
+      potentialAccident = false;
+    }
+  }
+
+  // Print DHT11 data (Temperature and Humidity) every 10 seconds
+  if (millis() - lastDHTPrintTime >= DHT_INTERVAL) {
+    lastDHTPrintTime = millis();
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    if (isnan(temperature) || isnan(humidity)) {
+      Serial.println("Failed to read from DHT sensor.");
+    } else {
+      Serial.print("Temperature: ");
+      Serial.print(temperature);
+      Serial.print(" °C, Humidity: ");
+      Serial.print(humidity);
+      Serial.println(" %");
+    }
+  }
+
+  // Print car movement status every 15 seconds
+  if (carRunning && millis() - lastMovementPrintTime >= MOVEMENT_INTERVAL) {
+    lastMovementPrintTime = millis();
+    Serial.println("Current Movement: " + lastMovement);
+  }
+
+  // Process Bluetooth commands via Serial
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n'); // Read command from Bluetooth/Serial
+    command.trim();  // Remove whitespace
+
+    if (command == "start") {
+      if (accidentDetected) {
+        accidentDetected = false;
+        Serial.println("Accident cleared. Ready to restart.");
+      }
+      if (!carRunning) {
+        carRunning = true;
+        Serial.println("Car started.");
+      }
+    } else if (command == "stop") {
+      if (carRunning) {
+        carRunning = false;
+        stopCar();
+        Serial.println("Car stopped.");
+      }
+    } else if (carRunning) {
+      // Directional commands for the car
+      if (command == "left") {
+        turnLeft();
+        lastMovement = "Turning Left";
+      } else if (command == "right") {
+        turnRight();
+        lastMovement = "Turning Right";
+      } else if (command == "back") {
+        moveBackward();
+        lastMovement = "Moving Backward";
+      } else if (command == "slow") {
+        slowDown();
+        lastMovement = "Slowing Down";
+      }
+    }
+  }
+
+  // Ultrasonic sensor for automatic movement control
+  if (carRunning && !accidentDetected) {
+    digitalWrite(TRIGPIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIGPIN, HIGH);
+    delayMicroseconds(10);
+    float duration = pulseIn(ECHOPIN, HIGH);
+    float distance = duration / 58.2;  // Convert time to distance in cm
+
+    if (distance > 15) {
+      Myservo.write(90); // Straight position for servo
+      moveForward();
+      lastMovement = "Moving Forward";
+    } else if (distance <= 10 && distance > 0) {
+      stopCar();
+      Myservo.write(0);
+      delay(500);
+      Myservo.write(180);
+      delay(500);
+      Myservo.write(90);
+      delay(500);
+      moveBackward();
+      delay(500);
+      stopCar();
+      turnLeft();
+      delay(500);
+      if (distance <= 10) {
+        turnRight();
+        lastMovement = "Obstacle detected, turning right";
+      }
+    }
+  }
+}
+
+// Car Control Functions
+void stopCar() {
+  analogWrite(ENA, 0);
+  analogWrite(ENB, 0);
+  digitalWrite(MRf, LOW);
+  digitalWrite(MRb, LOW);
+  digitalWrite(MLf, LOW);
+  digitalWrite(MLb, LOW);
+}
+
+void moveForward() {
+  analogWrite(ENA, MOTOR_SPEED);
+  analogWrite(ENB, MOTOR_SPEED);
+  digitalWrite(MRf, HIGH);
+  digitalWrite(MRb, LOW);
+  digitalWrite(MLf, HIGH);
+  digitalWrite(MLb, LOW);
+}
+
+void moveBackward() {
+  analogWrite(ENA, MOTOR_SPEED);
+  analogWrite(ENB, MOTOR_SPEED);
+  digitalWrite(MRf, LOW);
+  digitalWrite(MRb, HIGH);
+  digitalWrite(MLf, LOW);
+  digitalWrite(MLb, HIGH);
+}
+
+void turnLeft() {
+  analogWrite(ENA, MOTOR_SPEED);
+  analogWrite(ENB, MOTOR_SPEED);
+  digitalWrite(MRf, LOW);
+  digitalWrite(MRb, HIGH);
+  digitalWrite(MLf, HIGH);
+  digitalWrite(MLb, LOW);
+}
+
+void turnRight() {
+  analogWrite(ENA, MOTOR_SPEED);
+  analogWrite(ENB, MOTOR_SPEED);
+  digitalWrite(MRf, HIGH);
+  digitalWrite(MRb, LOW);
+  digitalWrite(MLf, LOW);
+  digitalWrite(MLb, HIGH);
+}
+
+void slowDown() {
+  analogWrite(ENA, MOTOR_SPEED / 2);
+  analogWrite(ENB, MOTOR_SPEED / 2);
+}
